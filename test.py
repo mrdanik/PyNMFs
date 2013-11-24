@@ -55,9 +55,6 @@ def RandMatH5(rows, cols, h5Path, name):
 
 
 def test_nmf():
-    #count of parallel processes
-    prcnt = 5
-    
     ###################### preparing data ######################
     #read Y matrix from txt file and write it in to hdf5 file
     FromTxt('TestY.hdf5', 'Y', 'TestY.txt', Transpose = True, dtype = 'int')
@@ -66,72 +63,18 @@ def test_nmf():
     Yh5 = Yh5Base['Y']
     #convert to sparse lil matrix
     lilMat = lil_matrix(Yh5.__array__())
+    
+    #count of parallel processes
+    prcntRow = 5
+    prcntCol = 6
     rN, cN = lilMat.shape
-    
-    #get nonzero elements and indexes from lilMat
-    rows = []
-    cols = []
-    values = []
-    for k,row in enumerate(lilMat.rows.tolist()):
-        for col in row:
-            rows.append(k)
-            cols.append(col)
-    for vl in lilMat.data:
-        for v in vl:
-            values.append(v)
-    
-    #lilMat will be splitted in to 'prcnt' matrices that contain rows 
-    #and in to 'prcnt' matrices that contain cols
-    shape_list_r = [len(range(rN)[k::prcnt]) for k in range(prcnt)]
-    shape_list_c = [len(range(cN)[k::prcnt]) for k in range(prcnt)]
-    user_lists = [[] for k in xrange(prcnt)]
-    song_lists = [[] for k in xrange(prcnt)]
-    item_lists = [[] for k in xrange(prcnt)]
-    
-    #rows
-    YMats_row = []
-    
-    for row,col,val in zip(rows,cols,values):
-        pr = row%prcnt
-        row_r = row//prcnt
-    
-        user_lists[pr].append(col)
-        song_lists[pr].append(row_r)
-        item_lists[pr].append(val)
-    
-    for k in xrange(prcnt):
-        lilM = lil_matrix( (shape_list_r[k], cN), dtype=np.dtype('>i4') )
-        for (s,u,itm) in zip(song_lists[k], user_lists[k], item_lists[k]):
-            lilM[s,u] = itm
-        YMats_row.append(lilM.tocsr())
-    
-    user_lists = [[] for k in xrange(prcnt)]
-    song_lists = [[] for k in xrange(prcnt)]
-    item_lists = [[] for k in xrange(prcnt)]
-    
-    #cols
-    YMats_col = []
-    for row,col,val in zip(rows,cols,values):
-        pr = col%prcnt
-        col_r = col//prcnt
-        
-        song_lists[pr].append(row)
-        user_lists[pr].append(col_r)
-        item_lists[pr].append(val)
-    
-    
-    for k in xrange(prcnt):
-        lilM = lil_matrix( (shape_list_c[k], rN), dtype=np.dtype('>i4') )
-        for (s,u,itm) in zip(song_lists[k], user_lists[k], item_lists[k]):
-            lilM[u,s] = itm
-        YMats_col.append(lilM.tocsr())
     
     ###################### initialize D,X and params ######################
     Dh5Path = 'D.hdf5'
     Xh5Path = 'X.hdf5'
     rows = rN
     cols = cN
-    dim = 10 #D dimension = clasters count
+    dim = 100 #D dimension = clasters count
     workdir = 'workdir'
     if not os.path.exists(workdir):
             os.makedirs(workdir)
@@ -149,7 +92,7 @@ def test_nmf():
     
     ###################### processing ######################
     pyNMFs = PyNMFs()
-    pyNMFs.NMF(opts, YMats_row, YMats_col, Dh5Path, Xh5Path, workdir)
+    pyNMFs.NMF(opts, lilMat, (prcntRow, prcntCol), Dh5Path, Xh5Path, workdir)
     
     ###################### save results ######################
     ToTxt(Dh5Path, 'D', 'D.txt')
