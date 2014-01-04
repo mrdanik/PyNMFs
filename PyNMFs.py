@@ -363,16 +363,18 @@ def PgradNgradX(Y_cols_csr, XmpArr, DmpArr, params, cols_list, ind):
     for k,Xh5col in enumerate(inXh5):
         #if (k*100)/cols_len < ((k+1)*100)/cols_len: print 'Process N%s  %s'%(ind, ((k+1)*100)/cols_len) + '%'
         Ycol = Y_cols_csr.getrow(k)
-        _y = np.reshape( np.dot(D,Xh5col),  (1,rows) )
+        Xh5col = np.reshape(Xh5col, (dim,1))
+        _y = np.reshape( np.dot(D, Xh5col),  (1,rows) )
+        
         if opts.beta<2:
             _y[_y<opts.eps] = opts.eps
         
         pgradX = np.dot( (_y)**(opts.beta-1), D ).transpose()
-        ngradX = (csr_matrix( Ycol.multiply( (_y)**(opts.beta-2) ) ).dot(D)).transpose()
-        updateXh5_array[:,k] = Xh5col * ngradX[:,0] / (pgradX[:,0] + opts.lmbd)
+        ngradX = ( (csr_matrix( Ycol.multiply( (_y)**(opts.beta-2) ).astype(np.float32) ).dot(D)).transpose() ).astype(np.float32)
+        updateXh5_array[:,k] = Xh5col[:,0] * ngradX[:,0] / (pgradX[:,0] + opts.lmbd)
+    
     
     updateXh5.write_direct(updateXh5_array)
-    
     updateXBase.close()
 
 
@@ -406,6 +408,8 @@ def PgradNgradD(Y_rows_csr, XmpArr, DmpArr, params, rows_list, ind):
     updateDBase = h5py.File( updateDpath, 'w' )
     updateDh5 = updateDBase.create_dataset( "D", (rows_len, dim) )
     
+    updateDh5_array = np.empty(shape=(rows_len, dim), dtype=updateDh5.dtype)
+    
     inDh5 = iter(D[rows_list,...])
     
     
@@ -418,10 +422,13 @@ def PgradNgradD(Y_rows_csr, XmpArr, DmpArr, params, rows_list, ind):
         
         
         pgradD = np.dot( ( (_y)**(opts.beta-1) ), X_tr )
-        pgradD[pgradD<opts.eps] = opts.eps;
-        ngradD = csr_matrix( Yrow.multiply( (_y)**(opts.beta-2) ) ).dot(X_tr)
-        updateDh5[k,] = Dh5row * ngradD / pgradD
+        pgradD[pgradD<opts.eps] = opts.eps
         
+        ngradD = ( Yrow.multiply( (_y)**(opts.beta-2) ).astype(np.float32) ).dot(X_tr)
+        ngradD = np.squeeze(np.asarray(ngradD))
+        updateDh5_array[k,] = Dh5row * ngradD / pgradD[0,]
+    
+    updateDh5.write_direct(updateDh5_array)
     updateDBase.close()
 
 

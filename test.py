@@ -65,8 +65,8 @@ def test_nmf():
     lilMat = lil_matrix(Yh5.__array__())
     
     #count of parallel processes
-    prcntRow = 5
-    prcntCol = 6
+    prcntRow = 3
+    prcntCol = 3
     rN, cN = lilMat.shape
     
     ###################### initialize D,X and params ######################
