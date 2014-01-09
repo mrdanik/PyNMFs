@@ -5,23 +5,30 @@ Algorithm estimates matrices D,X such as
                                 
             Y = D*X             
                                 
-Parallel represenation using is used
+Parallel represenation is used
 D and X are dense matrices. D, X are stored in hdf5 files
 
-Initially Y mast be splitted by N row matrices and N col matrices
+Initially Y will be splitted by N row matrices and N col matrices
 N is a number of parallel processes
+
+Auto parallelization is on if NumPy MKL is used.
+Set next command to the command prompt (for Windows) before launching python scripts
+"set OMP_NUM_THREADS=K"
+where K is the max number of processes for auto parallelization.
+K = 1 is recommended
 
 .................................................................
 Danila Doroshin
 http://www.linkedin.com/in/daniladoroshin
 
-2013
+2013-2014
 '''
 # -*- coding: utf8 -*-
 import os
 from os.path import join, basename, splitext
 from scipy.sparse import lil_matrix, csr_matrix, csc_matrix
 from multiprocessing import Process, Queue
+from itertools import islice
 import multiprocessing as mp
 import numpy as np
 import h5py
@@ -29,12 +36,6 @@ import time
 
 
 DEBUG_TIME = True
-
-def clear_dir(folder):
-    for the_file in os.listdir(folder):
-            file_path = join(folder, the_file)
-            if os.path.isfile(file_path):
-                os.unlink(file_path)
 
 
 class optsNMF():
@@ -48,22 +49,16 @@ class optsNMF():
 
 
 class PyNMFs():
-    def NMF(self, opts, Y_lil, (prcountRow, prcountCol), Dh5Path, Xh5Path, workdir):
+    def NMF(self, opts, Y_lil, (prcountRow, prcountCol), Dh5Path, Xh5Path):
         self.opts = opts
         self.prcountRow = prcountRow
         self.prcountCol = prcountCol
         self.Dh5Path = Dh5Path
         self.Xh5Path = Xh5Path
-        self.workdir = workdir
         self.shape_rows, self.shape_cols = Y_lil.shape
         self.shape_dim = self.getDShape()[1]
         #split Y for parallel processing
         self.Yr_Mlist, self.Yc_Mlist = self.SplitY(Y_lil, self.prcountRow, self.prcountCol)
-        
-        #self.shape_rows = Yc_Mlist[0].shape[1]
-        #self.shape_cols = Yr_Mlist[0].shape[1]
-        
-        
         
         
         # creating shared memmory
@@ -83,6 +78,22 @@ class PyNMFs():
         Xh5 = Xh5Base['X']
         Xh5.read_direct(self.X)
         Xh5Base.close()
+        
+        # creating shared memmory for update matrixes
+        self.XmpArrUpdateList = []
+        self.XUpdateList = []
+        for c_list in [range(self.shape_cols)[k::self.prcountCol] for k in xrange(self.prcountCol)]:
+            cols_len = len(c_list)
+            self.XmpArrUpdateList.append( mp.RawArray('f', self.shape_dim * cols_len) )
+            self.XUpdateList.append( np.ndarray((self.shape_dim, cols_len), buffer=self.XmpArrUpdateList[-1], dtype='f') )
+        
+        self.DmpArrUpdateList = []
+        self.DUpdateList = []
+        for r_list in [range(self.shape_rows)[k::self.prcountRow] for k in range(self.prcountRow)]:
+            rows_len = len(r_list)
+            self.DmpArrUpdateList.append( mp.RawArray('f', rows_len * self.shape_dim ) )
+            self.DUpdateList.append( np.ndarray(( rows_len, self.shape_dim ), buffer=self.DmpArrUpdateList[-1], dtype='f') )
+        
         
         
         if DEBUG_TIME: avtm = 0
@@ -195,7 +206,6 @@ class PyNMFs():
     
     def XUpdate(self):
         print 'Updating matrix X...'
-        clear_dir(self.workdir)
         
         # get cols and rows
         rows = self.shape_rows
@@ -209,11 +219,11 @@ class PyNMFs():
         #parallel processing
         if DEBUG_TIME: tb = time.time()
         print 'Starting %s parallel processes...'%(prcnt)
-        params = (self.workdir, self.opts, (rows, cols, dim))
+        params = (self.opts, (rows, cols, dim))
         if prcnt > 1:
             pr_list = []
             for k in xrange(prcnt):
-                p = Process(target=PgradNgradX, args=(self.Yc_Mlist[k], self.XmpArr, self.DmpArr, params, cols_list[k], k))
+                p = Process(target=PgradNgradX, args=(self.Yc_Mlist[k], self.XmpArr, self.DmpArr, params, cols_list[k], k, self.XmpArrUpdateList[k]))
                 p.start()
                 pr_list.append(p)
             
@@ -221,21 +231,16 @@ class PyNMFs():
             for k in xrange(prcnt):
                 pr_list[k].join()
         else:
-            PgradNgradX(self.Yc_Mlist[0], self.XmpArr, self.DmpArr, params, cols_list[0], 0)
+            PgradNgradX(self.Yc_Mlist[0], self.XmpArr, self.DmpArr, params, cols_list[0], 0, self.XmpArrUpdateList[0])
             
         print 'All parallel processes have been complieted.'
         if DEBUG_TIME: print '\nTime of XUpdate parallel = %s\n'%(time.time()-tb)
         
         #update X
         if DEBUG_TIME: tb = time.time()
-        print 'Get information from work dir and update X...'
+        print 'Merge of update matrixes for X...'
         for k in xrange(prcnt):
-            updateXpath = join(self.workdir, 'updateX%s.hdf5'%(k))
-            updateXBase = h5py.File( updateXpath, 'r' )
-            updateXh5 = updateXBase['X']
-            self.X[:,cols_list[k]] = updateXh5[:,]
-            updateXBase.close()
-            os.remove(updateXpath)
+            self.X[:,cols_list[k]] = self.XUpdateList[k][:,]
         
         Xh5Base = h5py.File( self.Xh5Path, 'w' )
         Xh5 = Xh5Base.create_dataset( 'X', data=self.X )
@@ -246,7 +251,6 @@ class PyNMFs():
     
     def DUpdate(self):
         print 'Updating matrix D...'
-        clear_dir(self.workdir)
         
         # get cols and rows
         rows = self.shape_rows
@@ -260,11 +264,11 @@ class PyNMFs():
         #parallel processing
         if DEBUG_TIME: tb = time.time()
         print 'Starting %s parallel processes...'%(prcnt)
-        params = (self.workdir, self.opts, (rows, cols, dim))
+        params = (self.opts, (rows, cols, dim))
         if prcnt > 1:
             pr_list = []
             for k in xrange(prcnt):
-                p = Process(target=PgradNgradD, args=(self.Yr_Mlist[k], self.XmpArr, self.DmpArr, params, rows_list[k], k))
+                p = Process(target=PgradNgradD, args=(self.Yr_Mlist[k], self.XmpArr, self.DmpArr, params, rows_list[k], k, self.DmpArrUpdateList[k]))
                 p.start()
                 pr_list.append(p)
             
@@ -272,7 +276,7 @@ class PyNMFs():
             for k in xrange(prcnt):
                 pr_list[k].join()
         else:
-            PgradNgradD(self.Yr_Mlist[0], self.XmpArr, self.DmpArr, params, rows_list[0], 0)
+            PgradNgradD(self.Yr_Mlist[0], self.XmpArr, self.DmpArr, params, rows_list[0], 0, self.DmpArrUpdateList[0])
         
         print 'All parallel processes have been complieted.'
         if DEBUG_TIME: print '\nTime of DUpdate parallel = %s\n'%(time.time()-tb) 
@@ -281,12 +285,8 @@ class PyNMFs():
         if DEBUG_TIME: tb = time.time()
         print 'Get information from work dir and update D...'
         for k in xrange(prcnt):
-            updateDpath = join(self.workdir, 'updateD%s.hdf5'%(k))
-            updateDBase = h5py.File( updateDpath, 'r' )
-            updateDh5 = updateDBase['D']
-            self.D[rows_list[k],] = updateDh5[:,]
-            updateDBase.close()
-            os.remove(updateDpath)
+            self.D[rows_list[k],] = self.DUpdateList[k][:,]
+        
         
         Dh5Base = h5py.File( self.Dh5Path, 'w' )
         Dh5 = Dh5Base.create_dataset( 'D', data=self.D)
@@ -329,7 +329,7 @@ class PyNMFs():
 '''
 Multiprocessing functions
 '''
-def PgradNgradX(Y_cols_csr, XmpArr, DmpArr, params, cols_list, ind):
+def PgradNgradX(Y_cols_csr, XmpArr, DmpArr, params, cols_list, ind, XmpArrUpdate):
     ################## MatLab code ##################
     '''
     %update X
@@ -342,7 +342,7 @@ def PgradNgradX(Y_cols_csr, XmpArr, DmpArr, params, cols_list, ind):
     X = X .* ngradX ./ (pgradX + lambda_factor);
     '''
     #################################################
-    workdir, opts, mShapes = params
+    opts, mShapes = params
     (rows, cols, dim) = mShapes
     
     # mp_arr and arr share the same memory
@@ -352,15 +352,17 @@ def PgradNgradX(Y_cols_csr, XmpArr, DmpArr, params, cols_list, ind):
     
     cols_len = len(cols_list)
     
-    updateXpath = join(workdir, 'updateX%s.hdf5'%(ind))
-    updateXBase = h5py.File( updateXpath, 'w' )
-    updateXh5 = updateXBase.create_dataset( "X", (dim, cols_len) )
+    updateXh5_array = np.ndarray((dim, cols_len), buffer=XmpArrUpdate, dtype='f')
     
-    updateXh5_array = np.empty(shape=(dim, cols_len ), dtype=updateXh5.dtype)
+    #inXh5 = iter(X_tr[cols_list,...])
+    inXh5 = iter(X_tr)
+    if cols_len>1:
+        step = cols_list[1]-cols_list[0]
+        inXh5slice = islice(inXh5, cols_list[0], cols_list[-1]+step, step)
+    else:
+        inXh5slice = islice(inXh5, cols_list[0], cols_list[0]+1, 1)
     
-    inXh5 = iter(X_tr[cols_list,...])
-    
-    for k,Xh5col in enumerate(inXh5):
+    for k,Xh5col in enumerate(inXh5slice):
         #if (k*100)/cols_len < ((k+1)*100)/cols_len: print 'Process N%s  %s'%(ind, ((k+1)*100)/cols_len) + '%'
         Ycol = Y_cols_csr.getrow(k)
         Xh5col = np.reshape(Xh5col, (dim,1))
@@ -374,11 +376,9 @@ def PgradNgradX(Y_cols_csr, XmpArr, DmpArr, params, cols_list, ind):
         updateXh5_array[:,k] = Xh5col[:,0] * ngradX[:,0] / (pgradX[:,0] + opts.lmbd)
     
     
-    updateXh5.write_direct(updateXh5_array)
-    updateXBase.close()
 
 
-def PgradNgradD(Y_rows_csr, XmpArr, DmpArr, params, rows_list, ind):
+def PgradNgradD(Y_rows_csr, XmpArr, DmpArr, params, rows_list, ind, DmpArrUpdate):
     ################## MatLab code ##################
     '''
     %update D
@@ -392,7 +392,7 @@ def PgradNgradD(Y_rows_csr, XmpArr, DmpArr, params, rows_list, ind):
     D = D .* ngradD ./ pgradD;
     '''
     #################################################
-    workdir, opts, mShapes = params
+    opts, mShapes = params
     (rows, cols, dim) = mShapes
     
     # mp_arr and arr share the same memory
@@ -404,16 +404,17 @@ def PgradNgradD(Y_rows_csr, XmpArr, DmpArr, params, rows_list, ind):
     
     rows_len = len(rows_list)
     
-    updateDpath = join(workdir, 'updateD%s.hdf5'%(ind))
-    updateDBase = h5py.File( updateDpath, 'w' )
-    updateDh5 = updateDBase.create_dataset( "D", (rows_len, dim) )
+    updateDh5_array = np.ndarray((rows_len, dim), buffer=DmpArrUpdate, dtype='f')
     
-    updateDh5_array = np.empty(shape=(rows_len, dim), dtype=updateDh5.dtype)
+    #inDh5 = iter(D[rows_list,...])
+    inDh5 = iter(D)
+    if rows_len>1:
+        step = rows_list[1]-rows_list[0]
+        inDh5slice = islice(inDh5, rows_list[0], rows_list[-1]+step, step)
+    else:
+        inDh5slice = islice(inDh5, rows_list[0], rows_list[0]+1, 1)
     
-    inDh5 = iter(D[rows_list,...])
-    
-    
-    for k,Dh5row in enumerate(inDh5):
+    for k,Dh5row in enumerate(inDh5slice):
         #if (k*100)/rows_len < ((k+1)*100)/rows_len: print 'Process N%s  %s'%(ind, ((k+1)*100)/rows_len) + '%'
         Yrow = Y_rows_csr.getrow(k)
         _y = np.reshape( np.dot(Dh5row,X), (1,cols) )
@@ -428,8 +429,6 @@ def PgradNgradD(Y_rows_csr, XmpArr, DmpArr, params, rows_list, ind):
         ngradD = np.squeeze(np.asarray(ngradD))
         updateDh5_array[k,] = Dh5row * ngradD / pgradD[0,]
     
-    updateDh5.write_direct(updateDh5_array)
-    updateDBase.close()
 
 
 def BetaDivergenceParallel(Y_cols_csr, XmpArr, DmpArr, mShapes, beta, eps, cols_list, ind, rp_queue):

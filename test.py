@@ -2,17 +2,29 @@
 '''
 NMF test script
 
+Auto parallelization is on if NumPy MKL is used.
+Set next command to the command prompt (for Windows) before launching python scripts
+"set OMP_NUM_THREADS=K"
+where K is the max number of processes for auto parallelization.
+K = 1 is recommended
+
 .................................................................
 Danila Doroshin
 http://www.linkedin.com/in/daniladoroshin
 
-2013
+2013-2014
 '''
 import os
 import numpy as np
 import h5py
 from scipy.sparse import lil_matrix
-from PyNMFs import clear_dir, optsNMF, PyNMFs
+from PyNMFs import optsNMF, PyNMFs
+
+def clear_dir(folder):
+    for the_file in os.listdir(folder):
+            file_path = join(folder, the_file)
+            if os.path.isfile(file_path):
+                os.unlink(file_path)
 
 def FromTxt(h5Path, name, txtPath, Transpose = False, dtype = 'float'):
     if dtype == 'int':
@@ -75,11 +87,7 @@ def test_nmf():
     rows = rN
     cols = cN
     dim = 100 #D dimension = clasters count
-    workdir = 'workdir'
-    if not os.path.exists(workdir):
-            os.makedirs(workdir)
-    else:
-        clear_dir(workdir)
+    
     
     #NMF options
     opts = optsNMF()
@@ -92,7 +100,7 @@ def test_nmf():
     
     ###################### processing ######################
     pyNMFs = PyNMFs()
-    pyNMFs.NMF(opts, lilMat, (prcntRow, prcntCol), Dh5Path, Xh5Path, workdir)
+    pyNMFs.NMF(opts, lilMat, (prcntRow, prcntCol), Dh5Path, Xh5Path)
     
     ###################### save results ######################
     ToTxt(Dh5Path, 'D', 'D.txt')
